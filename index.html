@@ -120,6 +120,10 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--k4);outline-off
 .mode b{display:block;font-family:var(--display);font-weight:400;font-size:18px;margin-bottom:3px}
 .mode span{display:block;color:var(--muted);font-size:14px;line-height:1.4}
 div.mode{cursor:default}
+.mode .lab{margin-top:10px}.mode .btn{margin-top:10px}
+.chips{display:flex;gap:6px;margin-top:6px}
+.chip{flex:1 1 0;min-width:0;min-height:42px;padding:0 2px;border-radius:12px;border:2px solid var(--line);background:transparent;color:var(--ink);font:600 14px var(--font);white-space:nowrap}
+.chip.on{background:var(--k2);border-color:var(--k2);color:#1D1533}
 .lab{display:block;font-size:14px;font-weight:500;color:var(--muted);margin-top:12px}
 .field{display:block;width:100%;min-height:50px;border-radius:14px;border:2px solid var(--line);background:transparent;color:var(--ink);
   font:500 17px var(--font);padding:0 14px;margin-top:6px;-webkit-user-select:text;user-select:text}
@@ -155,7 +159,7 @@ textarea.field{min-height:220px;padding:10px;font:12px/1.4 ui-monospace,Menlo,mo
 <script>
 (() => {
 'use strict';
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const N = 8, PAD = 6, GAP = 3;
 const PEER_PREFIX = 'blokduel-v1-';
 const $ = s => document.querySelector(s);
@@ -170,6 +174,7 @@ const ls = {
 };
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => Number(n || 0).toLocaleString('nl-NL');
+const ptn = n => `${fmt(n)} ${n === 1 ? 'punt' : 'punten'}`;
 const fmtTime = ms => { const s = Math.ceil(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 
 /* ---------------- LOG van de laatste run ---------------- */
@@ -321,16 +326,25 @@ const boardStr = b => Array.from(b).join('');
 /* Blokkeerduel: één bord, om de beurt. Het bord wordt bij elke zet deterministisch opnieuw afgespeeld
    uit (seed, wie begint, zetten van speler 0, zetten van speler 1). Zo blijven beide toestellen gelijk. */
 const DUEL_COL = [2, 4];
-function duelReplay(seed, starter, mv) {
+function duelReplay(seed, starter, mv, tout) {
   const b = new Uint8Array(64);
   const R = [new RNG(seed ^ 0x51ED), new RNG((seed ^ 0xB10C) + 7)];
   const mk = p => genTray(R[p], b).map(x => ({ s: x.s, c: DUEL_COL[p] }));
   const trays = [mk(0), mk(1)];
-  const idx = [0, 0], pts = [0, 0], sc = [{ combo: 0, miss: 0 }, { combo: 0, miss: 0 }];
-  let k = 0, turn = starter, loser = -1, last = null, bad = false;
-  for (;;) {
-    const p = (starter + k) % 2; turn = p;
-    if (stuck(b, trays[p])) { loser = p; break; }
+  const idx = [0, 0], pts = [0, 0], sc = [{ combo: 0, miss: 0 }, { combo: 0, miss: 0 }], out = [0, 0];
+  let k = 0, turn = starter, winner = -1, done = false, last = null, bad = false;
+  /* Af (klem of tijd op) blijft af. De ander wint zodra die meer punten heeft; zijn beiden af, dan beslissen de punten. */
+  const judge = () => {
+    if (out[0] && out[1]) { done = true; winner = pts[0] > pts[1] ? 0 : pts[1] > pts[0] ? 1 : 2; return true; }
+    for (let a = 0; a < 2; a++) if (out[a] && !out[1 - a] && pts[1 - a] > pts[a]) { done = true; winner = 1 - a; return true; }
+    return false;
+  };
+  for (let guard = 0; guard < 4000; guard++) {
+    if (judge()) break;
+    if (out[turn]) turn = 1 - turn;
+    const p = turn;
+    if (tout[p] >= 0 && idx[p] >= tout[p]) { out[p] = 2; continue; }
+    if (stuck(b, trays[p])) { out[p] = 1; continue; }
     if (idx[p] * 3 + 3 > mv[p].length) break;
     const m = mv[p].substr(idx[p] * 3, 3), slot = +m[0], r = +m[1], c = +m[2];
     const piece = trays[p][slot];
@@ -339,8 +353,9 @@ function duelReplay(seed, starter, mv) {
     pts[p] += res.pts; trays[p][slot] = null;
     if (trays[p].every(x => !x)) trays[p] = mk(p);
     last = { p, res }; idx[p]++; k++;
+    turn = 1 - p;
   }
-  return { b, trays, turn, loser, pts, k, last, bad };
+  return { b, trays, turn, out, winner, done, pts, k, idx, last, bad };
 }
 
 /* ---------------- DOM ---------------- */
@@ -586,10 +601,10 @@ function soloGame(saved) {
   return g;
 }
 
-function raceGame(seed, gid) {
+function raceGame(seed, gid, tm) {
   const st = newRun(seed); st.sent = 0; st.applied = 0; st.done = false;
-  const DUR = 120000; let why = '', shown = false, oppGone = false;
-  let opp = { b: '', s: 0, at: 0, dn: 0 };
+  const DUR = (tm || 120) * 1000; let why = '', shown = false, oppGone = false;
+  let opp = { b: '', s: 0, at: 0, dn: 0, w: '' };
   const g = {
     kind: 'race', gid, startAt: performance.now() + 3200,
     board: () => st.b, tray: () => st.tray,
@@ -597,24 +612,35 @@ function raceGame(seed, gid) {
     waitMsg: () => st.done ? 'Jij bent klaar' : 'Even wachten op de start',
     hud() {
       const now = performance.now(), left = DUR - Math.max(0, now - g.startAt);
-      return { big: fmt(st.score), mode: 'Scoreduel', sub: st.done ? (why === 'vast' ? 'Geen ruimte meer' : 'Tijd is om') : now < g.startAt ? 'Klaar voor de start' : fmtTime(left) + ' over', subColor: left < 15000 && !st.done ? 'var(--k1)' : '' };
+      const sub = st.done ? (why === 'voor' ? 'Jij hebt meer punten' : why === 'vast' ? 'Geen ruimte meer' : 'Tijd is om')
+        : now < g.startAt ? 'Klaar voor de start'
+        : opp.dn ? `${ptn(opp.s - st.score + 1)} nodig, ${fmtTime(left)}` : fmtTime(left) + ' over';
+      return { big: fmt(st.score), mode: 'Scoreduel', sub, subColor: left < 15000 && !st.done ? 'var(--k1)' : '' };
     },
     oppInfo: () => ({ name: oppNick(), score: fmt(opp.s), board: opp.b || '0'.repeat(64), color: 'var(--k4)',
-      stat: oppGone ? 'Verbinding weg' : opp.dn ? 'Klaar' : st.sent ? `Speelt nog, ${st.sent} ${st.sent === 1 ? 'steen' : 'stenen'} van jou gekregen` : 'Speelt nog' }),
+      stat: oppGone ? 'Verbinding weg' : opp.dn ? (opp.w === 'vast' ? 'Zit klem' : opp.w === 'voor' ? 'Heeft meer punten' : 'Tijd is om')
+        : st.done ? (opp.s > st.score ? 'Heeft meer punten' : `Speelt nog, ${ptn(st.score - opp.s + 1)} nodig`)
+        : st.sent ? `Speelt nog, ${st.sent} ${st.sent === 1 ? 'steen' : 'stenen'} van jou gekregen` : 'Speelt nog' }),
     drop(slot, r, c) {
       const res = applyMove(st, slot, r, c); if (!res) return null;
       fxMove(res);
       const n = stonesFor(res);
       if (n) { st.sent += n; setTimeout(() => toast(`${n} ${n === 1 ? 'steen' : 'stenen'} naar ${oppNick()}!`, 1400), 250); Log.add('game', `race: ${n} stenen verstuurd`); }
-      publish(); return res;
+      publish(); checkLead(); return res;
     },
     afterDrag() { takeStones(); checkStuck(); },
     onOpp(o) {
       if (!o.rb || o.rb.g !== gid) return;
-      opp = { b: typeof o.rb.b === 'string' ? o.rb.b.slice(0, 64) : '', s: o.rb.s | 0, at: o.rb.at | 0, dn: o.rb.dn | 0 };
+      const wasDn = opp.dn;
+      opp = { b: typeof o.rb.b === 'string' ? o.rb.b.slice(0, 64) : '', s: o.rb.s | 0, at: o.rb.at | 0, dn: o.rb.dn | 0, w: ['vast', 'tijd', 'voor'].includes(o.rb.w) ? o.rb.w : '' };
       if (!drag) { takeStones(); checkStuck(); }
-      maybeEnd();
+      if (opp.dn && !wasDn && !st.done && opp.w === 'vast') {
+        Log.add('game', `race: ${oppNick()} zit klem met ${opp.s} punten`);
+        if (st.score <= opp.s) toast(`${oppNick()} zit klem. Haal meer dan ${fmt(opp.s)} punten!`, 3000);
+      }
+      checkLead(); maybeEnd();
     },
+    dbg: () => ({ st, opp, why, DUR }),
     tick() { if (!st.done && performance.now() - g.startAt >= DUR) finish('tijd'); maybeEnd(); },
     lost() { oppGone = true; maybeEnd(); },
     found() { oppGone = false; }
@@ -631,6 +657,7 @@ function raceGame(seed, gid) {
     }
   }
   function checkStuck() { if (!st.done && performance.now() >= g.startAt && stuck(st.b, st.tray)) finish('vast'); }
+  function checkLead() { if (!st.done && opp.dn && !oppGone && st.score > opp.s) finish('voor'); }
   function finish(w) {
     st.done = true; why = w; publish();
     Log.add('game', `race klaar (${w}): score=${st.score} zetten=${st.moves} verstuurd=${st.sent} ontvangen=${st.applied}`);
@@ -641,38 +668,56 @@ function raceGame(seed, gid) {
   function maybeEnd() {
     if (shown || !st.done || !(opp.dn || oppGone)) return;
     shown = true;
-    setTimeout(() => showVersusResult({ mode: 'race', mine: st.score, theirs: opp.s, gone: oppGone && !opp.dn }), 600);
+    setTimeout(() => showVersusResult({ mode: 'race', mine: st.score, theirs: opp.s, gone: oppGone && !opp.dn, myWhy: why, oppWhy: opp.w }), 600);
   }
-  function publish() { Net.set({ rb: { g: gid, b: boardStr(st.b), s: st.score, at: st.sent, dn: st.done ? 1 : 0 } }); }
+  function publish() { Net.set({ rb: { g: gid, b: boardStr(st.b), s: st.score, at: st.sent, dn: st.done ? 1 : 0, w: why } }); }
   publish();
   return g;
 }
 
-function duelGame(seed, gid, local) {
+function duelGame(seed, gid, local, tm) {
   const starter = local ? localRound % 2 : (gid + 1) % 2;
   const me = local ? -1 : (Net.role === 'h' ? 0 : 1);
-  const mv = ['', ''];
-  let v = duelReplay(seed, starter, mv), shown = false, lostAt = 0;
+  const TM = (tm | 0) * 1000;
+  const mv = ['', ''], tout = [-1, -1], used = [0, 0];
+  let v = duelReplay(seed, starter, mv, tout), shown = false, lostAt = 0, clkP = -1, clkAt = performance.now();
   const who = () => local ? v.turn : me;
   const name = p => local ? `Speler ${p + 1}` : p === me ? 'Jij' : oppNick();
+  const running = () => !v.done && (local || Net.connected);
+  function clock() {
+    const now = performance.now();
+    if (clkP >= 0) used[clkP] += now - clkAt;
+    clkAt = now; clkP = TM && running() && !v.out[v.turn] ? v.turn : -1;
+  }
+  const left = p => TM - used[p] - (clkP === p ? performance.now() - clkAt : 0);
+  const clk = p => TM ? ', ' + fmtTime(Math.max(0, left(p))) : '';
+  const need = p => v.pts[1 - p] - v.pts[p] + 1;
+  const outTxt = p => v.out[p] === 1 ? (p === me ? 'Je zit klem' : `${name(p)} zit klem`) : (p === me ? 'Je tijd is op' : `${name(p)} heeft geen tijd meer`);
   const g = {
     kind: local ? 'local' : 'duel', gid,
     board: () => v.b, tray: () => v.trays[who()],
-    canInteract: () => v.loser < 0 && v.turn === who() && (local || Net.connected),
-    waitMsg: () => v.loser >= 0 ? 'Het spel is voorbij' : !local && !Net.connected ? 'Verbinding is weg' : `${oppNick()} is aan zet`,
+    canInteract: () => !v.done && v.turn === who() && !v.out[who()] && (local || Net.connected) && (!TM || left(who()) > 0),
+    waitMsg: () => v.done ? 'Het spel is voorbij' : !local && !Net.connected ? 'Verbinding is weg' : v.out[who()] ? 'Jij bent af' : TM && left(who()) <= 0 ? 'Je tijd is op' : `${oppNick()} is aan zet`,
     hud() {
-      const t = v.turn;
+      const t = v.turn, P = local ? t : me;
       let sub;
-      if (v.loser >= 0) sub = `${name(v.loser)} zit klem`;
+      if (v.done) sub = v.winner === 2 ? 'Gelijkspel' : `${name(v.winner)} wint`;
       else if (!local && !Net.connected) sub = 'Verbinding weg…';
-      else if (local) sub = `${name(t)} is aan zet`;
-      else sub = t === me ? 'Jouw beurt' : `${oppNick()} is aan zet`;
-      return { big: fmt(v.pts[local ? t : me]), sub, subColor: `var(--k${DUEL_COL[t]})`, glow: `var(--k${DUEL_COL[t]})`, mode: local ? 'Samen spelen' : 'Blokkeerduel' };
+      else if (local) sub = v.out[1 - t] ? `${name(t)}: ${ptn(need(t))} nodig${clk(t)}` : `${name(t)} is aan zet${clk(t)}`;
+      else if (v.out[me]) sub = outTxt(me);
+      else if (t === me) sub = v.out[1 - me] ? `${ptn(need(me))} nodig${clk(me)}` : `Jouw beurt${clk(me)}`;
+      else sub = `${oppNick()} is aan zet`;
+      const low = TM && !v.done && t === P && !v.out[t] && left(t) < 15000;
+      return { big: fmt(v.pts[P]), sub, subColor: low ? 'var(--k1)' : `var(--k${DUEL_COL[t]})`, glow: v.done ? 'transparent' : `var(--k${DUEL_COL[t]})`, mode: local ? 'Samen spelen' : 'Blokkeerduel' };
     },
     oppInfo() {
       const o = local ? 1 - v.turn : 1 - me;
-      return { name: name(o), score: fmt(v.pts[o]), tray: v.trays[o], color: `var(--k${DUEL_COL[o]})`,
-        stat: v.loser >= 0 ? (v.loser === o ? 'Zit klem' : 'Wint') : v.turn === o ? 'Is aan zet' : 'Wacht op de volgende beurt' };
+      const stat = v.done ? (v.winner === 2 ? 'Gelijkspel' : v.winner === o ? 'Wint' : 'Verliest')
+        : v.out[o] ? (v.out[o] === 1 ? 'Zit klem' : 'Tijd is op')
+        : v.out[1 - o] ? `${ptn(need(o))} nodig${clk(o)}`
+        : v.turn === o ? `Is aan zet${clk(o)}`
+        : TM ? `Bedenktijd ${fmtTime(Math.max(0, left(o)))}` : 'Wacht op de volgende beurt';
+      return { name: name(o), score: fmt(v.pts[o]), tray: v.trays[o], color: `var(--k${DUEL_COL[o]})`, stat };
     },
     drop(slot, r, c) {
       if (!g.canInteract()) return null;
@@ -685,28 +730,49 @@ function duelGame(seed, gid, local) {
     },
     onOpp(o) {
       if (local || o.dg !== gid || typeof o.mv !== 'string' || !/^([0-2][0-7][0-7])*$/.test(o.mv)) return;
-      const other = 1 - me;
-      if (o.mv.length > mv[other].length && o.mv.startsWith(mv[other])) { mv[other] = o.mv.slice(0, 900); update(); }
+      const other = 1 - me; let ch = false;
+      if (o.mv.length > mv[other].length && o.mv.startsWith(mv[other])) { mv[other] = o.mv.slice(0, 900); ch = true; }
+      if (tout[other] < 0 && Number.isInteger(o.to) && o.to >= 0 && o.to * 3 <= mv[other].length) { tout[other] = o.to; ch = true; }
+      if (ch) update();
     },
     tick() {
+      clock();
+      if (TM && running()) {
+        const p = v.turn;
+        if (!v.out[p] && (local || p === me) && tout[p] < 0 && left(p) <= 0) {
+          tout[p] = v.idx[p];
+          Log.add('game', `duel: tijd op voor ${name(p)} na ${v.idx[p]} zetten`);
+          if (!local) Net.set({ dg: gid, to: tout[me] });
+          update();
+        }
+      }
       if (local || shown) return;
-      if (!Net.connected) { if (!lostAt) lostAt = Date.now(); else if (Date.now() - lostAt > 20000) { shown = true; showVersusResult({ mode: 'duel', gone: true, mine: v.pts[me], theirs: v.pts[1 - me] }); } }
+      if (!Net.connected) { if (!lostAt) lostAt = Date.now(); else if (Date.now() - lostAt > 20000) { shown = true; showVersusResult({ mode: 'duel', gone: true, me, pts: v.pts }); } }
       else lostAt = 0;
     },
-    lost() { toast('Verbinding weg. Even wachten…', 3000); }
+    lost() { toast('Verbinding weg. Even wachten…', 3000); },
+    dbg: () => ({ v, mv, tout, used, TM, left: [left(0), left(1)] })
   };
   function update() {
-    const prevK = v.k;
-    v = duelReplay(seed, starter, mv);
+    const prevK = v.k, prevOut = v.out.slice();
+    clock();
+    v = duelReplay(seed, starter, mv, tout);
+    clock();
     if (v.bad) Log.add('err', `duel: ongeldige zet bij zet ${v.k} (bord loopt niet gelijk?)`);
     if (v.k > prevK && v.last) fxMove(v.last.res);
-    if (v.loser >= 0 && !shown) {
+    if (!v.done) for (let p = 0; p < 2; p++) if (v.out[p] && !prevOut[p]) {
+      const q = 1 - p, goal = `meer dan ${fmt(v.pts[p])} punten`;
+      Log.add('game', `duel: ${name(p)} af (${v.out[p] === 1 ? 'klem' : 'tijd'}) met ${v.pts[p]} punten`);
+      toast(local ? `${outTxt(p)}. ${name(q)}: haal ${goal}!` : p === me ? `${outTxt(p)}. ${oppNick()} moet ${goal} halen.` : `${outTxt(p)}. Haal ${goal}!`, 3200);
+    }
+    if (v.done && !shown) {
       shown = true;
-      Log.add('game', `duel klaar: verliezer=${name(v.loser)} zetten=${v.k} punten=${v.pts.join('/')}`);
-      setTimeout(() => showVersusResult({ mode: local ? 'local' : 'duel', loser: v.loser, me, pts: v.pts }), 800);
+      Log.add('game', `duel klaar: winnaar=${v.winner === 2 ? 'gelijk' : name(v.winner)} af=${v.out.join('/')} zetten=${v.k} punten=${v.pts.join('/')} tijd=${TM / 1000}s`);
+      setTimeout(() => showVersusResult({ mode: local ? 'local' : 'duel', winner: v.winner, out: v.out.slice(), me, pts: v.pts }), 800);
     }
     renderAll();
   }
+  clock();
   return g;
 }
 
@@ -847,22 +913,22 @@ function onNetDown(why) {
 }
 function netError(type) { if (ui === 'wait') showNetError(type); }
 function onOpp(o) {
-  if (Net.role === 'g' && o.live === 1 && o.gid && o.gid !== curGid && (o.mode === 'race' || o.mode === 'duel') && Number.isFinite(o.seed)) startOnline(o.mode, o.seed | 0, o.gid | 0);
+  if (Net.role === 'g' && o.live === 1 && o.gid && o.gid !== curGid && (o.mode === 'race' || o.mode === 'duel') && Number.isFinite(o.seed)) startOnline(o.mode, o.seed | 0, o.gid | 0, validTm(o.mode, o.tm));
   if (G && G.onOpp && G.gid === curGid) G.onOpp(o);
   if (ui === 'lobby') updateLobby();
   renderOpp(); renderHud();
 }
 function hostStart(mode) {
-  const gid = (Net.mine.gid || 0) + 1, seed = (Math.random() * 0x7fffffff) | 0;
-  Net.set({ gid, mode, seed });
-  startOnline(mode, seed, gid);
+  const gid = (Net.mine.gid || 0) + 1, seed = (Math.random() * 0x7fffffff) | 0, tm = getTm(mode);
+  Net.set({ gid, mode, seed, tm });
+  startOnline(mode, seed, gid, tm);
 }
-function startOnline(mode, seed, gid) {
+function startOnline(mode, seed, gid, tm) {
   curGid = gid;
-  Net.set(Net.role === 'h' ? { gid, dg: 0, mv: '', rb: null, live: 1 } : { gid, dg: 0, mv: '', rb: null });
+  Net.set(Net.role === 'h' ? { gid, dg: 0, mv: '', to: -1, rb: null, live: 1 } : { gid, dg: 0, mv: '', to: -1, rb: null });
   closeOv(); clearToast(); ui = 'game';
-  G = mode === 'race' ? raceGame(seed, gid) : duelGame(seed, gid, false);
-  Log.add('game', `start ${mode === 'race' ? 'scoreduel' : 'blokkeerduel'} ronde=${gid} rol=${Net.role === 'h' ? 'maker' : 'gast'}`);
+  G = mode === 'race' ? raceGame(seed, gid, tm) : duelGame(seed, gid, false, tm);
+  Log.add('game', `start ${mode === 'race' ? 'scoreduel' : 'blokkeerduel'} ronde=${gid} rol=${Net.role === 'h' ? 'maker' : 'gast'} tijd=${tm ? tm + 's' : 'geen'}`);
   layout(); renderAll();
 }
 function leaveOnline() { clearTimeout(joinTimer); if (Net.role) Log.add('net', 'online sessie gestopt'); Net.reset(); }
@@ -926,18 +992,26 @@ function showNetError(type) {
     <button class="btn ghost" data-a="home">Naar start</button>`, 'neterr');
 }
 const MODE_DESC = {
-  race: ['Scoreduel', '2 minuten, allebei dezelfde blokken. Meeste punten wint. Maak je 2 of meer lijnen tegelijk, dan krijgt de ander stenen op zijn bord.'],
-  duel: ['Blokkeerduel', 'Samen op één bord, om de beurt. Je ziet elkaars blokken. Wie geen blok meer kwijt kan, verliest.']
+  race: ['Scoreduel', 'Tegelijk spelen met dezelfde blokken. Maak je 2 of meer lijnen tegelijk, dan krijgt de ander stenen op zijn bord.', 'Speelduur'],
+  duel: ['Blokkeerduel', 'Samen op één bord, om de beurt. Je ziet elkaars blokken, dus zet de ander klem.', 'Bedenktijd per speler']
 };
+const RULE = 'Zit je klem of is je tijd op, dan ben je af. De ander wint zodra die meer punten heeft. Zijn jullie allebei af, dan wint wie de meeste punten heeft.';
+const TM_OPTS = { race: [60, 120, 180, 300], duel: [0, 60, 120, 180, 300] };
+const tmOpts = m => TM_OPTS[m === 'race' ? 'race' : 'duel'];
+const validTm = (m, v) => tmOpts(m).includes(v) ? v : 120;
+const getTm = m => validTm(m, ls.get('tm.' + m, 120));
+const tmLabel = v => v ? `${v / 60} min` : 'Geen';
+const chipsHTML = m => `<div class="chips" role="group">${tmOpts(m).map(v => `<button class="chip${v === getTm(m) ? ' on' : ''}" data-a="tm" data-m="${m}" data-v="${v}" aria-pressed="${v === getTm(m)}">${tmLabel(v)}</button>`).join('')}</div>`;
 function showLobby() {
   const host = Net.role === 'h';
-  const modes = Object.entries(MODE_DESC).map(([k, [t, d]]) => host
-    ? `<button class="mode" data-a="start" data-mode="${k}"><b>${t}</b><span>${d}</span></button>`
+  const modes = Object.entries(MODE_DESC).map(([k, [t, d, lab]]) => host
+    ? `<div class="mode"><b>${t}</b><span>${d}</span><p class="lab">${lab}</p>${chipsHTML(k)}<button class="btn pri" data-a="start" data-mode="${k}">Start ${t}</button></div>`
     : `<div class="mode"><b>${t}</b><span>${d}</span></div>`).join('');
   openOv(`<h2>Verbonden met <span id="oppN"></span></h2>
     <p class="fine" id="rtt">Reactietijd meten…</p>
-    ${host ? '<p>Kies een spelvorm:</p>' : '<p class="status wait" id="netStatus"></p>'}
+    ${host ? '<p>Kies tijd en spelvorm:</p>' : '<p class="status wait" id="netStatus"></p>'}
     ${modes}
+    <p class="fine" style="margin-top:12px">${RULE}</p>
     <button class="btn ghost" data-a="home">Stoppen</button>`, 'lobby');
   updateLobby();
 }
@@ -953,21 +1027,26 @@ function showSoloOver(score, record) {
     <button class="btn ghost" data-a="home">Naar start</button>`, 'result');
 }
 function showVersusResult(r) {
-  let title, rows = '', btns = '';
+  let title, rows = '', btns = ''; clearToast();
   if (r.mode !== 'local' && Net.role === 'h') Net.set({ live: 0 });
   if (r.mode === 'race') {
     title = r.gone ? `${oppNick()} is weg` : r.mine > r.theirs ? 'Jij wint!' : r.mine < r.theirs ? `${oppNick()} wint` : 'Gelijkspel';
-    rows = `<div><span>Jij</span><b>${fmt(r.mine)}</b></div><div><span>${esc(oppNick())}</span><b>${fmt(r.theirs)}</b></div>`;
+    const why = r.gone ? '' : r.myWhy === 'voor' ? `${oppNick()} kon niet verder en jij haalde meer punten.` : r.oppWhy === 'voor' ? `Jij kon niet verder en ${oppNick()} haalde meer punten.` : '';
+    rows = (why ? `<p style="text-align:center">${esc(why)}</p>` : '') + `<div><span>Jij</span><b>${fmt(r.mine)}</b></div><div><span>${esc(oppNick())}</span><b>${fmt(r.theirs)}</b></div>`;
     (r.gone || r.mine >= r.theirs) ? sfx.win() : sfx.lose();
-  } else if (r.mode === 'duel') {
-    if (r.gone) { title = 'Verbinding verbroken'; }
-    else { const win = r.loser !== r.me; title = win ? 'Jij wint!' : `${oppNick()} wint`; win ? sfx.win() : sfx.lose();
-      rows = `<p style="text-align:center">${win ? `${esc(oppNick())} kan geen blok meer kwijt.` : 'Je kon geen blok meer kwijt.'}</p>
-        <div><span>Jouw punten</span><b>${fmt(r.pts[r.me])}</b></div><div><span>${esc(oppNick())}</span><b>${fmt(r.pts[1 - r.me])}</b></div>`; }
+  } else if (r.gone) {
+    title = 'Verbinding verbroken';
   } else {
-    title = `Speler ${2 - r.loser} wint!`; sfx.win();
-    rows = `<p style="text-align:center">Speler ${r.loser + 1} kan geen blok meer kwijt.</p>
-      <div><span>Speler 1</span><b>${fmt(r.pts[0])}</b></div><div><span>Speler 2</span><b>${fmt(r.pts[1])}</b></div>`;
+    const L = r.mode === 'local', w = r.winner;
+    const nm = p => L ? `Speler ${p + 1}` : p === r.me ? 'Jij' : oppNick();
+    const wasOut = p => r.out[p] === 1 ? (!L && p === r.me ? 'Je zat klem' : `${nm(p)} zat klem`) : (!L && p === r.me ? 'Je tijd was op' : `${nm(p)} had geen tijd meer`);
+    title = w === 2 ? 'Gelijkspel' : L ? `Speler ${w + 1} wint!` : w === r.me ? 'Jij wint!' : `${oppNick()} wint`;
+    let why;
+    if (r.out[0] && r.out[1]) why = w === 2 ? 'Jullie konden allebei niet verder, met evenveel punten.' : 'Jullie konden allebei niet verder. De meeste punten winnen.';
+    else { const a = r.out[0] ? 0 : 1; why = `${wasOut(a)} en ${!L && w === r.me ? 'jij hebt' : nm(w).replace(/^Speler/, 'speler') + ' heeft'} meer punten.`; }
+    const order = L ? [0, 1] : [r.me, 1 - r.me];
+    rows = `<p style="text-align:center">${esc(why)}</p>` + order.map(p => `<div><span>${esc(L ? nm(p) : p === r.me ? 'Jouw punten' : oppNick())}</span><b>${fmt(r.pts[p])}</b></div>`).join('');
+    (L || w === r.me || w === 2) ? sfx.win() : sfx.lose();
   }
   if (r.mode === 'local') btns = '<button class="btn pri" data-a="localnext">Nog een keer</button><button class="btn ghost" data-a="home">Naar start</button>';
   else if (r.gone || !Net.connected) btns = '<button class="btn pri" data-a="online">Nieuw online spel</button><button class="btn ghost" data-a="home">Naar start</button>';
@@ -992,18 +1071,33 @@ async function copyLog() {
   catch (e) { openOv(`<h2>Log</h2><p class="fine">Selecteer alles en kopieer.</p><textarea class="field" readonly>${esc(txt)}</textarea><button class="btn ghost" data-a="menu">Terug</button>`, 'menu'); }
 }
 
-function startSolo(saved) { leaveOnline(); closeOv(); ui = 'game'; G = soloGame(saved); layout(); renderAll(); }
+function startSolo(saved) { leaveOnline(); closeOv(); clearToast(); ui = 'game'; G = soloGame(saved); layout(); renderAll(); }
+function showLocalSetup() {
+  leaveOnline(); G = null; renderAll();
+  openOv(`<h2>Samen spelen</h2>
+    <p>Eén telefoon, om de beurt. Samen op één bord, en je ziet elkaars blokken.</p>
+    <p class="lab">Bedenktijd per speler</p>${chipsHTML('local')}
+    <p class="fine" style="margin-top:12px">${RULE}</p>
+    <button class="btn pri" data-a="localgo">Start</button>
+    <button class="btn ghost" data-a="home">Terug</button>`, 'localsetup');
+}
 function startLocal() {
-  leaveOnline(); closeOv(); ui = 'game';
-  G = duelGame((Math.random() * 0x7fffffff) | 0, ++localRound, true);
-  Log.add('game', 'samen-spelen gestart'); layout(); renderAll();
+  leaveOnline(); closeOv(); clearToast(); ui = 'game';
+  const tm = getTm('local');
+  G = duelGame((Math.random() * 0x7fffffff) | 0, ++localRound, true, tm);
+  Log.add('game', `samen-spelen gestart tijd=${tm ? tm + 's' : 'geen'}`); layout(); renderAll();
 }
 
 const ACT = {
   cont: () => startSolo(ls.get('solo', null)),
   solo: () => startSolo(null),
-  local: () => startLocal(),
+  local: () => showLocalSetup(),
+  localgo: () => startLocal(),
   localnext: () => startLocal(),
+  tm: el => {
+    ls.set('tm.' + el.dataset.m, +el.dataset.v);
+    el.parentElement.querySelectorAll('.chip').forEach(c => { const on = c === el; c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); });
+  },
   online: () => showOnline(),
   home: () => showHome(),
   host: el => goOnline('h', cleanCode(el && el.dataset.code).length === 4 ? cleanCode(el.dataset.code) : newCode()),
@@ -1032,7 +1126,7 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('input', e => { if (e.target.id === 'code') { const v = cleanCode(e.target.value); if (v !== e.target.value) e.target.value = v; } });
 
-setInterval(() => { if (G && G.tick) G.tick(); if (G) { renderHud(); renderTray(); } }, 200);
+setInterval(() => { if (G && G.tick) G.tick(); if (G) { renderHud(); renderTray(); renderOpp(); } }, 200);
 
 /* ---------------- START ---------------- */
 layout(); renderAll();
